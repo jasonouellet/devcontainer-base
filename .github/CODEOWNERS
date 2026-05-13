@@ -1,0 +1,9 @@
+# Define code owners for the repository
+* @jasonouellet
+
+# Specific file ownership
+.github/ @jasonouellet
+.devcontainer/ @jasonouellet
+README.md @jasonouellet
+DEVCONTAINER.md @jasonouellet
+LICENSE @jasonouellet
