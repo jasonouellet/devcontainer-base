@@ -1,0 +1,257 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - feature/first-version
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly security scan on Sunday at 2 AM UTC
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+
+  lint-dockerfile:
+    name: Lint Dockerfile
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: .devcontainer/Dockerfile
+          ignore: DL3008,DL3009
+
+  validate-json:
+    name: Validate JSON Files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate devcontainer.json
+        run: |
+          python3 -m json.tool .devcontainer/devcontainer.json > /dev/null
+          echo "✅ devcontainer.json is valid"
+
+      - name: Validate docker-compose.yml
+        run: |
+          python3 -m json.tool .devcontainer/docker-compose.yml 2>/dev/null && echo "✅ docker-compose.yml is valid" || \
+          python3 -c "import yaml; yaml.safe_load(open('.devcontainer/docker-compose.yml'))" && echo "✅ docker-compose.yml is valid" || \
+          echo "⚠️ Cannot validate YAML without PyYAML"
+
+  lint-shell:
+    name: Lint Shell Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.devcontainer'
+          severity: style
+
+  trivy-scan:
+    name: Trivy Vulnerability Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    # Run on: pushes, PRs, scheduled scans, and manual dispatch
+    # Skip on: pull requests from forks (to avoid permission issues)
+    if: |
+      github.event_name != 'pull_request' || 
+      github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.devcontainer/Dockerfile'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  dockerfile-security:
+    name: Dockerfile Security Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Dockerfile security checks
+        run: |
+          echo "🔍 Checking Dockerfile for security best practices..."
+          
+          # Check for privileged operations
+          if grep -q "systemctl" .devcontainer/Dockerfile; then
+            echo "⚠️ Warning: Found systemctl usage. Consider using alternatives."
+          fi
+          
+          # Check for hardcoded secrets
+          if grep -qE "(password|secret|key|token).*=" .devcontainer/Dockerfile; then
+            echo "🚨 Warning: Possible hardcoded credentials detected"
+          fi
+          
+          # Check for latest tag usage
+          if grep -q "FROM.*:latest" .devcontainer/Dockerfile; then
+            echo "⚠️ Warning: Using 'latest' tag. Consider pinning versions."
+          fi
+          
+          echo "✅ Manual security check completed"
+
+  build-and-test:
+    name: Build and Test Docker Image
+    runs-on: ubuntu-latest
+    needs: [lint-dockerfile, validate-json, lint-shell, trivy-scan, dockerfile-security]
+    # Skip build on scheduled runs (security scans only)
+    if: github.event_name != 'schedule'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image for testing
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: .devcontainer/Dockerfile
+          push: false
+          load: true
+          tags: devcontainer-base:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NODE_VERSION=20
+            PYTHON_VERSION=3.11
+
+      - name: Test Node.js installation
+        run: |
+          docker run --rm devcontainer-base:test node --version
+          docker run --rm devcontainer-base:test npm --version
+
+      - name: Test Python installation
+        run: |
+          docker run --rm devcontainer-base:test python3 --version
+          docker run --rm devcontainer-base:test pip --version
+
+      - name: Test Docker CLI
+        run: |
+          docker run --rm devcontainer-base:test docker --version
+
+      - name: Test GitHub CLI
+        run: |
+          docker run --rm devcontainer-base:test gh --version
+
+      - name: Test Git LFS
+        run: |
+          docker run --rm devcontainer-base:test git lfs version
+
+      - name: Test Podman
+        run: |
+          docker run --rm devcontainer-base:test podman --version
+
+  publish-candidate:
+    name: Publish Candidate Image
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'push' && github.ref_type == 'branch'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push candidate image
+        id: build_candidate
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: .devcontainer/Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.ref.name=ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            NODE_VERSION=20
+            PYTHON_VERSION=3.11
+
+      - name: Save candidate metadata artifact
+        run: |
+          mkdir -p artifacts
+          cat > artifacts/candidate-image.json <<EOF
+          {
+            "repository": "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}",
+            "candidate_tag": "ci-${{ github.sha }}",
+            "source_sha": "${{ github.sha }}",
+            "digest": "${{ steps.build_candidate.outputs.digest }}"
+          }
+          EOF
+
+      - name: Upload candidate metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-image-metadata
+          path: artifacts/candidate-image.json
+          retention-days: 14
+
+  workflow-summary:
+    name: Workflow Summary
+    runs-on: ubuntu-latest
+    needs: [lint-dockerfile, validate-json, lint-shell, trivy-scan, dockerfile-security, build-and-test, publish-candidate]
+    if: always()
+
+    steps:
+      - name: Check workflow status
+        run: |
+          if [ "${{ needs.lint-dockerfile.result }}" == "failure" ] || \
+             [ "${{ needs.validate-json.result }}" == "failure" ] || \
+             [ "${{ needs.lint-shell.result }}" == "failure" ] || \
+             [ "${{ needs.trivy-scan.result }}" == "failure" ] || \
+             [ "${{ needs.dockerfile-security.result }}" == "failure" ] || \
+             [ "${{ needs.build-and-test.result }}" == "failure" ] || \
+             [ "${{ needs.publish-candidate.result }}" == "failure" ]; then
+            echo "❌ Workflow failed - check logs above"
+            exit 1
+          fi
+          echo "✅ Workflow completed successfully"

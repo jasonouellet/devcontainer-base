@@ -1,0 +1,66 @@
+{
+  "name": "Devcontainer Base",
+  "description": "Custom development container with Node.js, Python, Docker, GitHub CLI, Git LFS, and Podman",
+  "image": "devcontainer-base:latest",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "..",
+    "args": {
+      "NODE_VERSION": "20",
+      "PYTHON_VERSION": "3.11"
+    }
+  },
+  "remoteUser": "developer",
+  "features": {},
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.vscode-typescript-next",
+        "ms-python.python",
+        "ms-vscode-remote.remote-containers",
+        "github.vscode-pull-request-github",
+        "github.copilot",
+        "ms-vscode.makefile-tools",
+        "eamodio.gitlens",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": true,
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "ms-python.python",
+        "[json]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        }
+      }
+    }
+  },
+  "forwardPorts": [3000, 5000, 8000, 8080],
+  "portsAttributes": {
+    "3000": {
+      "label": "Application",
+      "onAutoForward": "notify"
+    },
+    "5000": {
+      "label": "Flask",
+      "onAutoForward": "notify"
+    },
+    "8000": {
+      "label": "API",
+      "onAutoForward": "notify"
+    },
+    "8080": {
+      "label": "Web",
+      "onAutoForward": "notify"
+    }
+  },
+  "mounts": [
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+  ],
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "postStartCommand": "",
+  "remoteEnv": {
+    "PATH": "${containerEnv:PATH}:/usr/local/go/bin"
+  }
+}
